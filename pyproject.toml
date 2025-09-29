@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cost-estimator"
+version = "0.1.0"
+description = "Execution cost estimator core domain logic."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Cost Estimator Team" }
+]
+dependencies = [
+  "pydantic>=2.5,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.4,<9",
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.setuptools]
+packages = ["cost_estimator", "db", "infra"]
