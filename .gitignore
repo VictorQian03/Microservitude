@@ -20,9 +20,6 @@ ENV/
 # Testing artifacts
 .pytest_cache/
 
-# Ignore integration test for now
-.tests/integration/
-
 # IDE / tooling
 *.swp
 .idea/

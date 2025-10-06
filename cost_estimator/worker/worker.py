@@ -1,55 +1,68 @@
 # cost_estimator/worker/worker.py
 from __future__ import annotations
 
-import math
 import os
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Dict
+from typing import Dict, Tuple
 
 from cost_estimator.adapters.pg_repo import PgRepositories
+from cost_estimator.core.calculators import (
+    calculate_pct_adv_cost,
+    calculate_sqrt_cost,
+    CostCalculationError,
+)
 from cost_estimator.core.models import CostRequestRecord
 
 
-def _now_utc():
+def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _to_float(x) -> float:
-    if x is None:
-        return None  # type: ignore[return-value]
-    return float(x) if not isinstance(x, (int, float)) else x  # tolerate Decimal
+def _dec(x) -> Decimal:
+    if isinstance(x, Decimal):
+        return x
+    return Decimal(str(x))
 
 
-def _compute_pct_adv(notional_usd: float, adv_usd: float, params: Dict) -> Dict[str, float]:
-    c = float(params.get("c", 0.5))
-    cap = float(params.get("cap", 0.1))
-    q = min(notional_usd / adv_usd, cap) if adv_usd and adv_usd > 0 else 0.0
-    cost_usd = c * q * notional_usd
-    cost_bps = 1e4 * (cost_usd / notional_usd) if notional_usd > 0 else 0.0
-    return {"usd": cost_usd, "bps": cost_bps}
+def _compute_pct_adv(
+    *, notional_usd: Decimal, adv_usd: Decimal, params: Dict
+) -> Tuple[Decimal, Decimal]:
+    c = _dec(params.get("c", 0.5))
+    cap = params.get("cap", 0.1)
+    cap_dec = _dec(cap) if cap is not None else None
+    return calculate_pct_adv_cost(
+        notional_usd=notional_usd, adv_usd=adv_usd, c=c, cap=cap_dec
+    )
 
 
-def _compute_sqrt(shares: int, notional_usd: float, adv_usd: float, params: Dict, price_hint: float) -> Dict[str, float]:
-    A = float(params.get("A", 300.0))
-    B = float(params.get("B", 0.0))
-    price = float(params.get("price_hint", price_hint))
-    if price <= 0:
-        # derive from notional if possible
-        price = notional_usd / shares if shares > 0 else 1.0
-    adv_shares = adv_usd / price if price > 0 else 0.0
-    ratio = shares / adv_shares if adv_shares > 0 else 0.0
-    cost_bps = A * math.sqrt(ratio) + B if ratio > 0 else max(B, 0.0)
-    cost_usd = notional_usd * cost_bps / 1e4 if notional_usd > 0 else 0.0
-    return {"usd": cost_usd, "bps": cost_bps}
+def _compute_sqrt(
+    *, shares: int, notional_usd: Decimal, adv_usd: Decimal, params: Dict
+) -> Tuple[Decimal, Decimal]:
+    # price hint from request if present, else implied by notional/shares
+    price_env = os.getenv("PRICE_TEST_DEFAULT")
+    if price_env:
+        price = _dec(price_env)
+    else:
+        price = notional_usd / _dec(shares)
+
+    a = _dec(params.get("A", 300.0))
+    b = _dec(params.get("B", 0.0))
+    adv_shares = adv_usd / price
+    return calculate_sqrt_cost(
+        shares=shares, adv_shares=adv_shares, price=price, a=a, b=b
+    )
 
 
 def compute_cost(request_id: str) -> bool:
     """
-    RQ task. Loads request, computes per-model costs, writes result, marks done.
-    Returns True on success, False on handled error.
+    RQ job entrypoint.
+    - Load request, liquidity, and active models from Postgres.
+    - Compute model costs using core.calculators.
+    - Persist result and mark request status.
+    Returns True on success, False on handled failure.
     """
-    repos = PgRepositories.from_env()  # uses DATABASE_URL / DB_DSN / POSTGRES_DSN
+    repos = PgRepositories.from_env()
     costs = repos.costs
     models_repo = repos.models
     liq_repo = repos.liquidity
@@ -57,69 +70,48 @@ def compute_cost(request_id: str) -> bool:
     try:
         req = costs.get_request(request_id)
         if not isinstance(req, CostRequestRecord):
-            # Accept UUID or str in repo, but we expect DTO back.
+            costs.update_status(request_id, "error")
             return False
 
-        # Inputs
         ticker = req.ticker
-        d = req.d
+        d_str = req.d.isoformat() if hasattr(req.d, "isoformat") else str(req.d)
         shares = int(req.shares)
-        notional = _to_float(req.notional_usd)
-        if notional is None or notional <= 0:
-            costs.update_status(req.id, "error")
-            return False
+        notional = _dec(req.notional_usd)
 
-        liq = liq_repo.get_liquidity(ticker, d)
-        adv_usd = _to_float(liq.adv_usd) if liq and liq.adv_usd is not None else None
-        if adv_usd is None or adv_usd <= 0:
-            costs.update_status(req.id, "error")
-            return False
+        adv_usd = _dec(liq_repo.get_adv_for_ticker_date(ticker, d_str))
 
-        # Price hint: env or implied from notional/shares
-        env_price = os.getenv("PRICE_TEST_DEFAULT")
-        price_hint = float(env_price) if env_price else (notional / shares if shares > 0 else 100.0)
-
-        # Active models - build proper ModelCostBreakdown structure
-        per_model = {}
+        per_model: Dict[str, Dict[str, float]] = {}
         for m in models_repo.get_active_models():
             name = str(m.name).lower()
+            params = m.params or {}
+
             if name == "pct_adv":
-                result = _compute_pct_adv(notional, adv_usd, m.params or {})
-                per_model[name] = {
-                    "name": name,
-                    "version": m.version,
-                    "parameters": {k: float(v) for k, v in (m.params or {}).items()},
-                    "cost_usd": result["usd"],
-                    "cost_bps": result["bps"]
-                }
+                usd, bps = _compute_pct_adv(
+                    notional_usd=notional, adv_usd=adv_usd, params=params
+                )
             elif name == "sqrt":
-                result = _compute_sqrt(shares, notional, adv_usd, m.params or {}, price_hint)
-                per_model[name] = {
-                    "name": name,
-                    "version": m.version,
-                    "parameters": {k: float(v) for k, v in (m.params or {}).items()},
-                    "cost_usd": result["usd"],
-                    "cost_bps": result["bps"]
-                }
+                usd, bps = _compute_sqrt(
+                    shares=shares, notional_usd=notional, adv_usd=adv_usd, params=params
+                )
             else:
-                # Unknown model type, skip
                 continue
+
+            per_model[name] = {"usd": float(usd), "bps": float(bps)}
 
         if not per_model:
             costs.update_status(req.id, "error")
             return False
 
-        # Choose best by bps (lower is better)
-        best_model, best = min(per_model.items(), key=lambda kv: kv[1]["cost_bps"])
-        total_cost_bps = best["cost_bps"]
-        total_cost_usd = best["cost_usd"]
+        best_model = min(per_model.items(), key=lambda kv: kv[1]["bps"])
+        best_name, best_vals = best_model
+        total_cost_usd = best_vals["usd"]
+        total_cost_bps = best_vals["bps"]
 
-        # Persist result
         costs.save_result(
             request_id=str(req.id),
-            adv_usd=adv_usd,
+            adv_usd=float(adv_usd),
             models=per_model,
-            best_model=best_model,
+            best_model=best_name,
             total_cost_usd=total_cost_usd,
             total_cost_bps=total_cost_bps,
             computed_at=_now_utc(),
@@ -127,20 +119,24 @@ def compute_cost(request_id: str) -> bool:
         costs.update_status(req.id, "done")
         return True
 
-    except Exception:
-        # Best-effort error marking
+    except CostCalculationError:
         try:
-            costs.update_status(request_id, "error")  # type: ignore[arg-type]
+            costs.update_status(request_id, "error")
+        except Exception:
+            pass
+        return False
+    except Exception:
+        try:
+            costs.update_status(request_id, "error")
         except Exception:
             pass
         return False
 
 
-# Optional: allow manual CLI run for debugging
 if __name__ == "__main__":
     import sys
+
     if len(sys.argv) != 2:
         print("usage: python -m cost_estimator.worker.worker <request_id>")
-        sys.exit(2)
-    ok = compute_cost(sys.argv[1])
-    print("OK" if ok else "ERROR")
+        raise SystemExit(2)
+    print("OK" if compute_cost(sys.argv[1]) else "ERROR")

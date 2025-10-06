@@ -11,7 +11,7 @@ import pytest
 import psycopg
 from redis import Redis
 from rq import Queue, SimpleWorker
-from rq.serializers import JSONSerializer  # Add this import
+from rq.serializers import JSONSerializer 
 from testcontainers.postgres import PostgresContainer
 from testcontainers.redis import RedisContainer
 
