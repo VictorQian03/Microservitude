@@ -1,11 +1,11 @@
 # Execution Cost Estimator
 
-Phase 1 of the execution cost estimator focuses on the core domain logic for computing trading costs using percent-of-ADV and square-root impact models. The repository currently ships the calculation logic, accompanying abstractions, and unit tests.
+Phase 1 of the execution cost estimator focuses on the core domain logic for computing trading costs using percent-of-ADV and square-root impact models. The repository currently ships the calculation logic, accompanying abstractions, and unit tests. Phase 2 creates the Postgres database, runs Alembic migrations in db/, and seeds initial data for symbols, liquidity, and impact models.
 
 ## Prerequisites
 
-- Python 3.10+
-- (Optional) A virtual environment tool such as `python -m venv`
+- Python 3.10+ 
+- PostgreSQL 13+
 
 ## Setup
 
@@ -14,12 +14,46 @@ Phase 1 of the execution cost estimator focuses on the core domain logic for com
    python -m venv .venv
    source .venv/bin/activate
    ```
-2. Install the project in editable mode with the dev extras:
+2. Install the project in editable mode with the dev and db extras:
    ```bash
    pip install -e '.[dev]'
+   pip install -e '.[db]'
    ```
 
 This installs the core dependency (`pydantic`) and the development dependency (`pytest`).
+
+### 1 Start Postgres in Docker
+```bash
+# one-time named volume for persistence
+docker volume create costdb_pg
+
+# run Postgres 16 on localhost:5432 with default creds and DB name "costdb"
+docker run -d --name costdb \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=costdb \
+  -p 5432:5432 \
+  -v costdb_pg:/var/lib/postgresql/data \
+  postgres:16
+
+# wait until ready
+docker exec costdb pg_isready -U postgres
+```
+
+# Migrate schema using built-in defaults
+   ```bash
+   ce-db-up
+   ```
+
+# Seed initial data
+   ```bash
+   ce-db-seed
+   ```
+
+# To reset everything to defaults
+   ```bash
+   ce-db-reset
+   ```
 
 ## Running the Unit Tests
 
