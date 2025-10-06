@@ -16,8 +16,7 @@ Phase 1 of the execution cost estimator focuses on the core domain logic for com
    ```
 2. Install the project in editable mode with the dev and db extras:
    ```bash
-   pip install -e '.[dev]'
-   pip install -e '.[db]'
+   pip install -e '.[dev,db,test]'
    ```
 
 This installs the core dependency (`pydantic`) and the development dependency (`pytest`).
@@ -60,6 +59,11 @@ docker exec costdb pg_isready -U postgres
 Execute the calculator tests via:
 ```bash
 python -m pytest
+```
+
+Integration tests:
+```bash
+pytest -q tests/integration
 ```
 
 Pytest is configured to discover tests in the `tests/` directory and runs quietly by default.
