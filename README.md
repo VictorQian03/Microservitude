@@ -16,7 +16,7 @@ Phase 1 of the execution cost estimator focuses on the core domain logic for com
    ```
 2. Install the project in editable mode with the dev and db extras:
    ```bash
-   pip install -e '.[dev,db,test]'
+   pip install -e ".[test,worker,db,api]"
    ```
 
 This installs the core dependency (`pydantic`) and the development dependency (`pytest`).
