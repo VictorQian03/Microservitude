@@ -158,19 +158,19 @@ def redis_client(redis_url):
 
 @pytest.fixture(scope="session")
 def env_wiring(db_dsn, redis_url):
-    # Many apps use different env names. Set several.
     os.environ["DATABASE_URL"] = db_dsn
     os.environ["DB_DSN"] = db_dsn
     os.environ["POSTGRES_DSN"] = db_dsn
     os.environ["REDIS_URL"] = redis_url
     os.environ["RQ_REDIS_URL"] = redis_url
+    os.environ["RQ_QUEUE_NAME"] = "estimates"
     # Price hint used by worker if implemented
     os.environ.setdefault("PRICE_TEST_DEFAULT", str(TEST_PRICE))
     yield
 
 @pytest.fixture(scope="session")
 def app(env_wiring):
-    # Import your FastAPI app.
+    # Import FastAPI app.
     mod = pytest.importorskip("cost_estimator.api.main")
     return getattr(mod, "app", None) or getattr(mod, "create_app")()
 
@@ -179,17 +179,16 @@ async def http_client(app):
     import httpx
     from asgi_lifespan import LifespanManager
     async with LifespanManager(app):
-        async with httpx.AsyncClient(app=app, base_url="http://test") as client:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             yield client
 
 @pytest.fixture
 def rq_queue(redis_client):
-    # FIXED: Use JSONSerializer to avoid pickle encoding issues
     return Queue("estimates", connection=redis_client, serializer=JSONSerializer)
 
 @pytest.fixture
 def rq_worker(redis_client, rq_queue):
-    # FIXED: Use JSONSerializer to match the queue
     worker = SimpleWorker([rq_queue], connection=redis_client, serializer=JSONSerializer)
     return worker
 

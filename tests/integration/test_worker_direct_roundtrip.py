@@ -16,21 +16,32 @@ def test_worker_can_compute_when_row_preinserted(db_conn, rq_queue, rq_worker):
         )
     db_conn.commit()
 
-    # FIXED: Pass function as string path instead of importing it
-    # This is required when using JSONSerializer
     rq_queue.enqueue("cost_estimator.worker.worker.compute_cost", rid)
     rq_worker.work(burst=True)
 
     with db_conn.cursor() as cur:
         cur.execute(
-            "SELECT best_model, total_cost_bps, total_cost_usd FROM cost_results WHERE request_id=%s",
+            """
+            SELECT models, best_model, total_cost_bps, total_cost_usd
+            FROM cost_results
+            WHERE request_id=%s
+            """,
             (rid,),
         )
         row = cur.fetchone()
     assert row is not None
-    best, bps, usd = row[0], float(row[1]), float(row[2])
+    models_payload, best, bps, usd = row
+    assert isinstance(models_payload, dict)
     assert best in {"sqrt", "pct_adv"}
+    assert best in models_payload
+    breakdown = models_payload[best]
+    assert {"name", "version", "parameters", "cost_usd", "cost_bps"} <= set(breakdown)
+    assert breakdown["name"] == best
+    assert isinstance(breakdown["parameters"], dict)
+    assert float(breakdown["cost_bps"]) > 0
+    assert float(breakdown["cost_usd"]) > 0
+    bps = float(bps)
+    usd = float(usd)
     assert bps > 0 and usd > 0
-    # Basic sanity to guard regressions
     assert bps < 50.0
     assert math.isfinite(usd)

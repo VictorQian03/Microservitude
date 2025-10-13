@@ -19,7 +19,7 @@ Phase 1 of the execution cost estimator focuses on the core domain logic for com
    pip install -e ".[test,worker,db,api]"
    ```
 
-This installs the core dependency (`pydantic`) and the development dependency (`pytest`).
+This installs the core dependency (`pydantic`) and the full test stack (pytest, pytest-asyncio, pytest-cov, etc.).
 
 ### 1 Start Postgres in Docker
 ```bash
@@ -66,7 +66,7 @@ Integration tests:
 pytest -q tests/integration
 ```
 
-Pytest is configured to discover tests in the `tests/` directory and runs quietly by default.
+Pytest is configured to discover tests in the `tests/` directory, runs quietly by default, and now emits a terminal coverage report for the `cost_estimator` package on every run. To disable coverage, pass `--no-cov`. For an HTML report, add `--cov-report=html` and open `htmlcov/index.html` after the run completes.
 
 ## Latency Benchmarks
 

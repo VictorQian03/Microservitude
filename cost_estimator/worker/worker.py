@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 from cost_estimator.adapters.pg_repo import PgRepositories
 from cost_estimator.core.calculators import (
@@ -23,6 +23,28 @@ def _dec(x) -> Decimal:
     if isinstance(x, Decimal):
         return x
     return Decimal(str(x))
+
+
+def _coerce_param_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, Decimal):
+        return float(value)
+    try:
+        return float(_dec(value))
+    except Exception:
+        return value
+
+
+def _serialize_parameters(params: Dict) -> Dict[str, Any]:
+    if not params:
+        return {}
+    serialized: Dict[str, Any] = {}
+    for key, value in params.items():
+        serialized[str(key)] = _coerce_param_value(value)
+    return serialized
 
 
 def _compute_pct_adv(
@@ -80,38 +102,43 @@ def compute_cost(request_id: str) -> bool:
 
         adv_usd = _dec(liq_repo.get_adv_for_ticker_date(ticker, d_str))
 
-        per_model: Dict[str, Dict[str, float]] = {}
+        per_model: Dict[str, Dict[str, Any]] = {}
         for m in models_repo.get_active_models():
-            name = str(m.name).lower()
+            model_name = str(m.name)
             params = m.params or {}
 
-            if name == "pct_adv":
+            if model_name == "pct_adv":
                 usd, bps = _compute_pct_adv(
                     notional_usd=notional, adv_usd=adv_usd, params=params
                 )
-            elif name == "sqrt":
+            elif model_name == "sqrt":
                 usd, bps = _compute_sqrt(
                     shares=shares, notional_usd=notional, adv_usd=adv_usd, params=params
                 )
             else:
                 continue
 
-            per_model[name] = {"usd": float(usd), "bps": float(bps)}
+            per_model[model_name] = {
+                "name": model_name,
+                "version": int(m.version),
+                "parameters": _serialize_parameters(params),
+                "cost_usd": float(usd),
+                "cost_bps": float(bps),
+            }
 
         if not per_model:
             costs.update_status(req.id, "error")
             return False
 
-        best_model = min(per_model.items(), key=lambda kv: kv[1]["bps"])
-        best_name, best_vals = best_model
-        total_cost_usd = best_vals["usd"]
-        total_cost_bps = best_vals["bps"]
+        best_name, best_vals = min(per_model.items(), key=lambda kv: kv[1]["cost_bps"])
+        total_cost_usd = best_vals["cost_usd"]
+        total_cost_bps = best_vals["cost_bps"]
 
         costs.save_result(
             request_id=str(req.id),
             adv_usd=float(adv_usd),
             models=per_model,
-            best_model=best_name,
+            best_model=best_vals["name"] if best_vals.get("name") else best_name,
             total_cost_usd=total_cost_usd,
             total_cost_bps=total_cost_bps,
             computed_at=_now_utc(),

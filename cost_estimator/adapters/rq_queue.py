@@ -8,6 +8,7 @@ from uuid import UUID
 
 from redis import Redis
 from rq import Queue, Retry
+from rq.serializers import JSONSerializer
 
 from ..core.models import CostRequestRecord
 from ..core.ports import CostEstimationQueue
@@ -16,7 +17,7 @@ from ..core.ports import CostEstimationQueue
 @dataclass(slots=True)
 class RQConfig:
     redis_url: str
-    queue_name: str = "cost_estimates"
+    queue_name: str = "estimates"
     job_func_path: str = "cost_estimator.worker.worker.compute_cost"
     job_timeout_s: int = 120
     result_ttl_s: int = 0          # results live in Postgres, not RQ
@@ -26,8 +27,8 @@ class RQConfig:
 
 
 def _cfg_from_env() -> RQConfig:
-    url = getenv("REDIS_URL", "redis://localhost:6379/0")
-    name = getenv("RQ_QUEUE_NAME", "cost_estimates")
+    url = getenv("RQ_REDIS_URL") or getenv("REDIS_URL", "redis://localhost:6379/0")
+    name = getenv("RQ_QUEUE_NAME", "estimates")
     func = getenv("RQ_JOB_FUNC", "cost_estimator.worker.worker.compute_cost")
     timeout = int(getenv("RQ_JOB_TIMEOUT", "120"))
     result_ttl = int(getenv("RQ_RESULT_TTL", "0"))
@@ -73,7 +74,11 @@ class RQQueue(CostEstimationQueue):
             retry_intervals=cfg.retry_intervals if retry_intervals is None else retry_intervals,
         )
         self._redis = Redis.from_url(self._cfg.redis_url)
-        self._q = Queue(name=self._cfg.queue_name, connection=self._redis)
+        self._q = Queue(
+            name=self._cfg.queue_name,
+            connection=self._redis,
+            serializer=JSONSerializer,
+        )
 
     def enqueue(self, request: CostRequestRecord) -> str:
         """Enqueue a job by request id. Worker will load data from Postgres."""

@@ -7,7 +7,7 @@ from datetime import datetime, date, timezone
 from decimal import Decimal
 import os
 import re
-from typing import Callable, Iterable, Iterator, Optional, Protocol
+from typing import Any, Callable, Iterable, Iterator, Mapping, Optional, Protocol
 from uuid import UUID
 
 import psycopg
@@ -20,6 +20,7 @@ from ..core.models import (
     CostResult,
     ImpactModel,
     Liquidity,
+    ModelCostBreakdown,
     ModelName,
     RequestStatus,
 )
@@ -108,6 +109,61 @@ def _as_str(x) -> str:
         return x.value
     except AttributeError:
         return str(x)
+
+
+def _jsonify_value(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, Mapping):
+        return {str(k): _jsonify_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonify_value(v) for v in value]
+    return value
+
+
+def _normalize_models_payload(models: Any) -> dict[str, dict[str, Any]]:
+    if not models:
+        return {}
+
+    if hasattr(models, "items"):
+        iterable = models.items()
+    else:
+        raise TypeError(f"Unsupported models container type: {type(models)!r}")
+
+    normalized: dict[str, dict[str, Any]] = {}
+    for key, payload in iterable:
+        model_name = _as_str(key)
+        if isinstance(payload, ModelCostBreakdown):
+            data = payload.model_dump(mode="python")
+        elif isinstance(payload, Mapping):
+            data = dict(payload)
+        else:
+            raise TypeError(f"Unsupported model payload type: {type(payload)!r}")
+
+        if "cost_usd" not in data and "usd" in data:
+            data["cost_usd"] = data.pop("usd")
+        if "cost_bps" not in data and "bps" in data:
+            data["cost_bps"] = data.pop("bps")
+
+        parameters = data.get("parameters") or data.get("params") or {}
+        if not isinstance(parameters, Mapping):
+            parameters = {}
+
+        normalized_name = _as_str(data.get("name", model_name))
+        if "cost_usd" not in data or "cost_bps" not in data:
+            raise ValueError(f"Model payload for {normalized_name!r} missing cost fields")
+        normalized_payload = {
+            "name": normalized_name,
+            "version": int(data.get("version", 0)),
+            "parameters": {
+                str(param_key): _jsonify_value(param_val)
+                for param_key, param_val in parameters.items()
+            },
+            "cost_usd": _jsonify_value(data["cost_usd"]),
+            "cost_bps": _jsonify_value(data["cost_bps"]),
+        }
+        normalized[normalized_name] = normalized_payload
+    return normalized
 
 # ------------ Liquidity repo ------------
 
@@ -267,7 +323,7 @@ class CostRepository(CostRequestRepositoryPort):
             r: CostResult = args[0]
             request_id = str(r.request_id)
             adv_usd = None if getattr(r, "adv_usd", None) is None else Decimal(r.adv_usd)
-            models = dict(r.models) if getattr(r, "models", None) is not None else {}
+            raw_models = r.models if getattr(r, "models", None) is not None else {}
             best_model = None if getattr(r, "best_model", None) is None else _as_str(r.best_model)
             total_cost_usd = Decimal(r.total_cost_usd)
             total_cost_bps = Decimal(r.total_cost_bps)
@@ -276,12 +332,14 @@ class CostRepository(CostRequestRepositoryPort):
             request_id = str(kwargs["request_id"])
             adv_val = kwargs.get("adv_usd")
             adv_usd = None if adv_val is None else Decimal(adv_val)
-            models = kwargs.get("models") or {}
+            raw_models = kwargs.get("models") or {}
             bm = kwargs.get("best_model")
             best_model = None if bm is None else _as_str(bm)
             total_cost_usd = Decimal(kwargs["total_cost_usd"])
             total_cost_bps = Decimal(kwargs["total_cost_bps"])
             computed_at = kwargs.get("computed_at") or datetime.now(timezone.utc)
+
+        models = _normalize_models_payload(raw_models)
 
         sql = """
         insert into cost_results
