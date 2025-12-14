@@ -68,6 +68,17 @@ pytest -q tests/integration
 
 Pytest is configured to discover tests in the `tests/` directory, runs quietly by default, and now emits a terminal coverage report for the `cost_estimator` package on every run. To disable coverage, pass `--no-cov`. For an HTML report, add `--cov-report=html` and open `htmlcov/index.html` after the run completes.
 
+## Price configuration overrides
+
+The API infers a share price when requests omit explicit pricing details. The following environment variables control that lookup and therefore affect notional computation and the prices surfaced in API responses:
+
+- `PRICE_<TICKER>_<DATE>` – highest-precedence override for a specific symbol and trade date. `<DATE>` must be ISO-8601 (`YYYY-MM-DD`).
+- `PRICE_<TICKER>` – ticker-level fallback when a dated override is absent. The ticker is uppercased before lookup.
+- `PRICE_TEST_DEFAULT` – convenience default for tests; also used in the worker’s square-root calculator to seed the ADV-derived price.
+- `DEFAULT_SHARE_PRICE` – process-wide default when the ticker-specific variables are unset.
+
+Values must parse as decimals (e.g., `12`, `12.34`, `1e2`). If none of the above variables are set or parseable, the system falls back to `$1.00` per share.
+
 ## Latency Benchmarks
 
 The `benchmarks/` module provides lightweight latency checks for the core calculators. To exercise the defaults (100 warmup iterations, 1000 recorded runs per case), run:
