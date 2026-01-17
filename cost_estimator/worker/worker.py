@@ -47,11 +47,17 @@ def _serialize_parameters(params: Dict) -> Dict[str, Any]:
     return serialized
 
 
+def _require_param(params: Dict, key: str, model_name: str) -> Decimal:
+    if key not in params:
+        raise CostCalculationError(f"Missing parameter {key!r} for {model_name} model")
+    return _dec(params[key])
+
+
 def _compute_pct_adv(
     *, notional_usd: Decimal, adv_usd: Decimal, params: Dict
 ) -> Tuple[Decimal, Decimal]:
-    c = _dec(params.get("c", 0.5))
-    cap = params.get("cap", 0.1)
+    c = _require_param(params, "c", "pct_adv")
+    cap = params.get("cap")
     cap_dec = _dec(cap) if cap is not None else None
     return calculate_pct_adv_cost(notional_usd=notional_usd, adv_usd=adv_usd, c=c, cap=cap_dec)
 
@@ -66,8 +72,8 @@ def _compute_sqrt(
     else:
         price = notional_usd / _dec(shares)
 
-    a = _dec(params.get("A", 300.0))
-    b = _dec(params.get("B", 0.0))
+    a = _require_param(params, "A", "sqrt")
+    b = _require_param(params, "B", "sqrt")
     adv_shares = adv_usd / price
     return calculate_sqrt_cost(shares=shares, adv_shares=adv_shares, price=price, a=a, b=b)
 

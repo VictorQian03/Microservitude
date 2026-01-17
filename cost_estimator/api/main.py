@@ -176,11 +176,12 @@ def _enforce_rate_limit(request: Request) -> None:
         )
 
 
-def _infer_price_usd(ticker: str, trade_date: date) -> Decimal:
+def _require_price_usd(ticker: str, trade_date: date) -> Decimal:
     """
-    Heuristic price lookup.
+    Resolve a share price from explicit overrides.
 
-    The integration tests provide PRICE_TEST_DEFAULT. We fall back to $1 if unset.
+    This service intentionally fails fast if no override is configured to avoid
+    misleading cost estimates.
     """
 
     env_keys = (
@@ -191,12 +192,19 @@ def _infer_price_usd(ticker: str, trade_date: date) -> Decimal:
     )
     for key in env_keys:
         raw = os.getenv(key)
-        if raw:
-            try:
-                return Decimal(raw)
-            except (InvalidOperation, ValueError):
-                continue
-    return Decimal("1")
+        if raw is None or not raw.strip():
+            continue
+        try:
+            price = Decimal(raw)
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(f"Invalid price override in {key}") from exc
+        if price <= 0:
+            raise ValueError(f"Price override in {key} must be > 0")
+        return price
+    raise LookupError(
+        "No price override configured. Set PRICE_<TICKER>_<YYYY-MM-DD>, "
+        "PRICE_<TICKER>, DEFAULT_SHARE_PRICE, or PRICE_TEST_DEFAULT."
+    )
 
 
 def _load_cached_adv(cache: RedisCache, ticker: str, trade_date: date) -> Optional[CachedADV]:
@@ -425,7 +433,15 @@ def create_app() -> FastAPI:
                 detail=f"No liquidity for {ticker_norm} on {request.d.isoformat()}",
             )
 
-        price = _infer_price_usd(ticker_norm, request.d)
+        try:
+            price = _require_price_usd(ticker_norm, request.d)
+        except LookupError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=str(exc),
+            ) from exc
         notional = Decimal(request.shares) * price
         created_at = datetime.now(timezone.utc)
         record = CostRequestRecord(

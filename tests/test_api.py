@@ -149,6 +149,7 @@ def _build_client(
     monkeypatch: pytest.MonkeyPatch,
     *,
     rate_limit_per_min: str | None = None,
+    set_price_env: bool = True,
 ) -> Tuple[TestClient, FakeQueue, FakeCache]:
     cost_repo = FakeCostRepo()
     liquidity_repo = FakeLiquidityRepo({("AAPL", date(2025, 9, 19)): Decimal("5000000000")})
@@ -158,7 +159,16 @@ def _build_client(
 
     monkeypatch.setenv("APP_ENV", "test")
     monkeypatch.setenv("API_KEY", "test-api-key")
-    monkeypatch.setenv("PRICE_TEST_DEFAULT", "200")
+    if set_price_env:
+        monkeypatch.setenv("PRICE_TEST_DEFAULT", "200")
+    else:
+        for key in (
+            "PRICE_TEST_DEFAULT",
+            "DEFAULT_SHARE_PRICE",
+            "PRICE_AAPL",
+            "PRICE_AAPL_2025-09-19",
+        ):
+            monkeypatch.delenv(key, raising=False)
     if rate_limit_per_min is not None:
         monkeypatch.setenv("RATE_LIMIT_PER_MIN", rate_limit_per_min)
     monkeypatch.setattr(
@@ -243,5 +253,18 @@ def test_rate_limit_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
         assert resp1.status_code == 200
         resp2 = client.get("/adv/AAPL", params={"date": "2025-09-19"}, headers=headers)
         assert resp2.status_code == 429
+    finally:
+        client.close()
+
+
+def test_missing_price_override_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _queue, _cache = _build_client(monkeypatch, set_price_env=False)
+    headers = {"X-API-Key": "test-api-key"}
+    try:
+        body = {"ticker": "AAPL", "shares": 1000, "side": "buy", "date": "2025-09-19"}
+        resp = client.post("/estimate", json=body, headers=headers)
+        assert resp.status_code == 400
+        payload = resp.json()
+        assert "price override" in payload["detail"].lower()
     finally:
         client.close()

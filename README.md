@@ -61,6 +61,7 @@ export APP_ENV=dev
 export API_KEY=local-dev-key
 export DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/costdb
 export REDIS_URL=redis://localhost:6379/0
+export DEFAULT_SHARE_PRICE=200
 ```
 
 ### 4) Apply migrations and seed data
@@ -93,6 +94,7 @@ curl -H "X-API-Key: $API_KEY" \
   "http://localhost:8000/adv/AAPL?date=2025-09-19"
 
 # Submit estimate
+# Requires a price override (e.g., DEFAULT_SHARE_PRICE or PRICE_AAPL_2025-09-19)
 curl -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"ticker":"AAPL","shares":1000,"side":"buy","date":"2025-09-19"}' \
@@ -148,12 +150,22 @@ curl -H "X-API-Key: $API_KEY" \
 - `RQ_RETRY_MAX`: retry attempts (default `3`).
 - `RQ_RETRY_INTERVALS`: comma-separated retry intervals (default `10,30,90`).
 
-### Price lookup overrides
+### Price lookup overrides (required for /estimate)
+
+At least one price override must be set for the requested ticker/date or the API
+will return 400 to avoid misleading notional calculations.
 
 - `PRICE_<TICKER>_<DATE>`: per-ticker, per-date override (`YYYY-MM-DD`).
-- `PRICE_<TICKER>`: per-ticker fallback.
-- `PRICE_TEST_DEFAULT`: test helper default.
-- `DEFAULT_SHARE_PRICE`: process-wide fallback when others are absent.
+- `PRICE_<TICKER>`: per-ticker override.
+- `PRICE_TEST_DEFAULT`: test helper override.
+- `DEFAULT_SHARE_PRICE`: process-wide override.
+
+### Impact model parameter requirements
+
+Cost estimation fails fast if required parameters are missing:
+
+- `pct_adv` requires `c` (cap is optional).
+- `sqrt` requires `A` and `B`.
 
 ### Production guardrails
 
