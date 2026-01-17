@@ -7,6 +7,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from os import getenv
 from typing import Optional
+from urllib.parse import urlparse
 
 from redis import Redis
 
@@ -68,7 +69,8 @@ class RedisCache(LiquidityCache):
         decode_responses: bool = True,
     ) -> None:
         if client is None:
-            url = url or getenv("REDIS_URL", "redis://localhost:6379/0")
+            url = url or _redis_url_from_env()
+            _validate_redis_url(url)
             client = Redis.from_url(url, decode_responses=decode_responses)
         self._r = client
         self._ns = namespace
@@ -94,5 +96,29 @@ class RedisCache(LiquidityCache):
 
 
 def make_redis_cache_from_env(env_var: str = "REDIS_URL", namespace: str = "adv") -> RedisCache:
-    url = getenv(env_var, "redis://localhost:6379/0")
+    url = getenv(env_var) or _redis_url_from_env()
     return RedisCache(url=url, namespace=namespace)
+
+
+def _app_env() -> str:
+    return getenv("APP_ENV", "dev").lower()
+
+
+def _redis_url_from_env() -> str:
+    url = getenv("REDIS_URL")
+    if url:
+        _validate_redis_url(url)
+        return url
+    if _app_env() == "prod":
+        raise RuntimeError("REDIS_URL must be set when APP_ENV=prod")
+    return "redis://localhost:6379/0"
+
+
+def _validate_redis_url(url: str) -> None:
+    if _app_env() != "prod":
+        return
+    parsed = urlparse(url)
+    if parsed.scheme != "rediss":
+        raise RuntimeError("REDIS_URL must use rediss:// when APP_ENV=prod")
+    if not parsed.hostname:
+        raise RuntimeError("REDIS_URL must include a host when APP_ENV=prod")

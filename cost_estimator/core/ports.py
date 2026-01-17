@@ -1,4 +1,5 @@
 """Abstract interfaces defining the boundaries of the core domain."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod

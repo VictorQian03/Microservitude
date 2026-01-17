@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -9,6 +10,7 @@ from cost_estimator.cli import db as cli_db
 
 def test_db_url_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("APP_ENV", "dev")
     assert cli_db._db_url() == cli_db.DEFAULT_DB_URL
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://example/testdb")
@@ -56,7 +58,9 @@ def test_upgrade_head_invokes_alembic(monkeypatch: pytest.MonkeyPatch, capsys) -
     calls: list[tuple[object, str]] = []
 
     monkeypatch.setattr(cli_db, "_alembic_cfg", lambda: cfg)
-    monkeypatch.setattr(cli_db.command, "upgrade", lambda cfg_arg, target: calls.append((cfg_arg, target)))
+    monkeypatch.setattr(
+        cli_db.command, "upgrade", lambda cfg_arg, target: calls.append((cfg_arg, target))
+    )
 
     cli_db.upgrade_head()
 
@@ -110,6 +114,8 @@ def test_reset_runs_full_cycle(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     calls: list[tuple[str, object, str]] = []
     seed_calls: list[str] = []
 
+    monkeypatch.setenv("APP_ENV", "dev")
+    monkeypatch.setenv("CE_DB_RESET_CONFIRM", "1")
     monkeypatch.setattr(cli_db, "_alembic_cfg", lambda: cfg)
     monkeypatch.setattr(
         cli_db.command,
@@ -129,3 +135,27 @@ def test_reset_runs_full_cycle(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     assert seed_calls == ["seed"]
     output = capsys.readouterr().out
     assert "reset complete" in output
+
+
+def test_db_url_missing_in_prod_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("APP_ENV", "prod")
+    with pytest.raises(SystemExit) as excinfo:
+        cli_db._db_url()
+    assert "DATABASE_URL must be set" in str(excinfo.value)
+
+
+def test_reset_requires_confirmation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_ENV", "dev")
+    monkeypatch.delenv("CE_DB_RESET_CONFIRM", raising=False)
+    with pytest.raises(SystemExit) as excinfo:
+        cli_db.reset()
+    assert "CE_DB_RESET_CONFIRM" in str(excinfo.value)
+
+
+def test_reset_blocked_in_prod(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_ENV", "prod")
+    monkeypatch.setenv("CE_DB_RESET_CONFIRM", "1")
+    with pytest.raises(SystemExit) as excinfo:
+        cli_db.reset()
+    assert "APP_ENV=prod" in str(excinfo.value)

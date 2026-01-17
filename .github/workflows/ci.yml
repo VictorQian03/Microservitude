@@ -27,6 +27,14 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .[test,worker,db,api,dev]
 
+      - name: Run Ruff lint
+        run: |
+          ruff check .
+
+      - name: Run Ruff format check
+        run: |
+          ruff format --check .
+
       - name: Run unit tests
         run: |
           python -m pytest

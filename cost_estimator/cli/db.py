@@ -1,6 +1,8 @@
 from __future__ import annotations
+
 import os
 from pathlib import Path
+
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine
@@ -12,8 +14,27 @@ DEFAULT_ALEMBIC_INI = REPO_ROOT / "db" / "alembic.ini"
 DEFAULT_SCRIPT_LOCATION = REPO_ROOT / "db" / "migrations"
 DEFAULT_SEEDS = REPO_ROOT / "db" / "seeds.sql"
 
+
+def _app_env() -> str:
+    return os.getenv("APP_ENV", "dev").lower()
+
+
 def _db_url() -> str:
-    return os.getenv("DATABASE_URL", DEFAULT_DB_URL)
+    url = os.getenv("DATABASE_URL")
+    if url:
+        return url
+    if _app_env() == "prod":
+        raise SystemExit("DATABASE_URL must be set when APP_ENV=prod")
+    return DEFAULT_DB_URL
+
+
+def _require_reset_confirmation() -> None:
+    if _app_env() == "prod":
+        raise SystemExit("ce-db-reset is blocked when APP_ENV=prod")
+    confirm = os.getenv("CE_DB_RESET_CONFIRM", "").strip().lower()
+    if confirm not in {"1", "true", "yes"}:
+        raise SystemExit("Set CE_DB_RESET_CONFIRM=1 to allow ce-db-reset")
+
 
 def _alembic_cfg() -> Config:
     ini_path = Path(os.getenv("ALEMBIC_INI", str(DEFAULT_ALEMBIC_INI))).resolve()
@@ -25,13 +46,16 @@ def _alembic_cfg() -> Config:
     cfg.set_main_option("script_location", str(script_loc))
     return cfg
 
+
 def _seeds_path() -> Path:
     return Path(os.getenv("SEEDS_FILE", str(DEFAULT_SEEDS))).resolve()
+
 
 def upgrade_head() -> None:
     cfg = _alembic_cfg()
     command.upgrade(cfg, "head")
     print("migrated: head")
+
 
 def seed() -> None:
     seeds = _seeds_path()
@@ -43,7 +67,9 @@ def seed() -> None:
         conn.exec_driver_sql(sql)
     print(f"seeded: {seeds}")
 
+
 def reset() -> None:
+    _require_reset_confirmation()
     cfg = _alembic_cfg()
     command.downgrade(cfg, "base")
     command.upgrade(cfg, "head")

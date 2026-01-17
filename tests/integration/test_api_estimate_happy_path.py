@@ -1,5 +1,6 @@
 import math
 
+
 async def test_post_estimate_then_worker_then_get(http_client, rq_worker, db_conn):
     # Submit
     body = {"ticker": "AAPL", "shares": 100000, "side": "buy", "date": "2025-09-19"}

@@ -68,6 +68,15 @@ pytest -q tests/integration
 
 Pytest is configured to discover tests in the `tests/` directory, runs quietly by default, and now emits a terminal coverage report for the `cost_estimator` package on every run. To disable coverage, pass `--no-cov`. For an HTML report, add `--cov-report=html` and open `htmlcov/index.html` after the run completes.
 
+## Security and Environment Guardrails
+
+- API authentication: set `API_KEY` and include `X-API-Key: <value>` on all API routes except `/health`.
+- Rate limiting: `RATE_LIMIT_PER_MIN` (default `60`) and `RATE_LIMIT_WINDOW_S` (default `60`) control the per-IP in-process limiter.
+- Proxy awareness: set `TRUSTED_PROXY_IPS` (comma-separated IPs/CIDRs) to honor `X-Forwarded-For` for rate limiting when behind trusted proxies.
+- HTTPS enforcement: set `ENFORCE_HTTPS=1` to redirect HTTP requests to HTTPS (honors `X-Forwarded-Proto`).
+- Environment mode: `APP_ENV=dev|test|prod`. In `prod`, default DB/Redis URLs are rejected and TLS is required for Redis.
+- Destructive DB reset: `ce-db-reset` requires `CE_DB_RESET_CONFIRM=1` and is blocked entirely when `APP_ENV=prod`.
+
 ## Price configuration overrides
 
 The API infers a share price when requests omit explicit pricing details. The following environment variables control that lookup and therefore affect notional computation and the prices surfaced in API responses:

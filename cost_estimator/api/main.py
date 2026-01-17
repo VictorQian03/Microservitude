@@ -1,17 +1,23 @@
 # cost_estimator/api/main.py
 from __future__ import annotations
 
+import hmac
 import os
+import threading
+import time
+from collections import deque
+from collections.abc import Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
-from collections.abc import Mapping, Sequence
+from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from typing import Any, Dict, Optional
 from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.encoders import jsonable_encoder
+from fastapi.responses import RedirectResponse
 
 from cost_estimator.adapters.pg_repo import CostRepository, LiquidityRepository, PgRepositories
 from cost_estimator.adapters.redis_cache import RedisCache, make_redis_cache_from_env
@@ -50,6 +56,124 @@ class AppDependencies:
             self.queue._redis.close()  # type: ignore[attr-defined]
         except Exception:
             pass
+
+
+class _RateLimiter:
+    def __init__(self, *, limit: int, window_s: int) -> None:
+        self._limit = limit
+        self._window_s = window_s
+        self._lock = threading.Lock()
+        self._hits: dict[str, deque[float]] = {}
+
+    def allow(self, key: str) -> bool:
+        now = time.monotonic()
+        window_start = now - self._window_s
+        with self._lock:
+            bucket = self._hits.get(key)
+            if bucket is None:
+                bucket = deque()
+                self._hits[key] = bucket
+            while bucket and bucket[0] <= window_start:
+                bucket.popleft()
+            if len(bucket) >= self._limit:
+                return False
+            bucket.append(now)
+        return True
+
+
+def _trusted_proxy_networks() -> list[IPv4Network | IPv6Network]:
+    raw = os.getenv("TRUSTED_PROXY_IPS", "")
+    networks = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            networks.append(ip_network(entry, strict=False))
+        except ValueError:
+            continue
+    return networks
+
+
+def _client_ip(request: Request) -> str:
+    client = request.client.host if request.client else "unknown"
+    trusted = getattr(request.app.state, "trusted_proxies", [])
+    if not trusted or client == "unknown":
+        return client
+    try:
+        client_ip = ip_address(client)
+    except ValueError:
+        return client
+    if not any(client_ip in net for net in trusted):
+        return client
+    forwarded = request.headers.get("x-forwarded-for")
+    if not forwarded:
+        return client
+    return forwarded.split(",")[0].strip() or client
+
+
+def _is_https(request: Request) -> bool:
+    forwarded_proto = request.headers.get("x-forwarded-proto")
+    if forwarded_proto:
+        return forwarded_proto.split(",")[0].strip().lower() == "https"
+    return request.url.scheme == "https"
+
+
+def _should_enforce_https() -> bool:
+    return os.getenv("ENFORCE_HTTPS", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _rate_limiter_from_env() -> _RateLimiter | None:
+    try:
+        limit = int(os.getenv("RATE_LIMIT_PER_MIN", "60"))
+    except ValueError:
+        limit = 60
+    if limit <= 0:
+        return None
+    try:
+        window_s = int(os.getenv("RATE_LIMIT_WINDOW_S", "60"))
+    except ValueError:
+        window_s = 60
+    if window_s <= 0:
+        window_s = 60
+    return _RateLimiter(limit=limit, window_s=window_s)
+
+
+def _require_api_key_configured() -> str:
+    api_key = os.getenv("API_KEY")
+    if not api_key:
+        raise RuntimeError("API_KEY must be set to enable API access")
+    return api_key
+
+
+def _get_api_key(request: Request) -> str:
+    cached = getattr(request.app.state, "api_key", None)
+    if isinstance(cached, str) and cached:
+        return cached
+    api_key = _require_api_key_configured()
+    request.app.state.api_key = api_key
+    return api_key
+
+
+def _require_api_key(
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> None:
+    expected = _get_api_key(request)
+    if not x_api_key or not hmac.compare_digest(x_api_key, expected):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
+
+
+def _enforce_rate_limit(request: Request) -> None:
+    limiter = getattr(request.app.state, "rate_limiter", None)
+    if limiter is None:
+        return
+    client = _client_ip(request)
+    if not limiter.allow(client):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Rate limit exceeded",
+        )
 
 
 def _infer_price_usd(ticker: str, trade_date: date) -> Decimal:
@@ -122,7 +246,14 @@ def _extract_cost_bps(candidate: Any) -> Optional[Decimal]:
     if value is None and isinstance(candidate, Sequence) and len(candidate) == 2:
         _, payload = candidate
         if isinstance(payload, Mapping):
-            for k in ("cost_bps", "bps", "total_cost_bps", "total_bps", "impact_bps", "estimated_bps"):
+            for k in (
+                "cost_bps",
+                "bps",
+                "total_cost_bps",
+                "total_bps",
+                "impact_bps",
+                "estimated_bps",
+            ):
                 if k in payload:
                     value = payload[k]
                     break
@@ -196,6 +327,28 @@ def create_app() -> FastAPI:
                 app.state.deps = None
 
     app = FastAPI(lifespan=lifespan)
+    app.state.api_key = _require_api_key_configured()
+    app.state.rate_limiter = _rate_limiter_from_env()
+    app.state.trusted_proxies = _trusted_proxy_networks()
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        if _should_enforce_https() and not _is_https(request):
+            url = request.url.replace(scheme="https")
+            return RedirectResponse(str(url), status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+        )
+        if _is_https(request):
+            response.headers.setdefault(
+                "Strict-Transport-Security", "max-age=63072000; includeSubDomains"
+            )
+        return response
 
     def get_deps(request: Request) -> AppDependencies:
         deps = getattr(request.app.state, "deps", None)
@@ -226,6 +379,8 @@ def create_app() -> FastAPI:
     async def get_adv(
         ticker: str,
         trade_date: date = Query(..., alias="date"),
+        _: None = Depends(_require_api_key),
+        __: None = Depends(_enforce_rate_limit),
         cache: RedisCache = Depends(get_cache),
         liquidity_repo: LiquidityRepository = Depends(get_liquidity_repo),
     ) -> Dict[str, Any]:
@@ -256,6 +411,8 @@ def create_app() -> FastAPI:
     @app.post("/estimate")
     async def submit_estimate(
         request: CostRequestInput,
+        _: None = Depends(_require_api_key),
+        __: None = Depends(_enforce_rate_limit),
         cost_repo: CostRepository = Depends(get_cost_repo),
         liquidity_repo: LiquidityRepository = Depends(get_liquidity_repo),
         queue: RQQueue = Depends(get_queue),
@@ -289,6 +446,8 @@ def create_app() -> FastAPI:
     @app.get("/estimate/{request_id}")
     async def get_estimate_status(
         request_id: UUID,
+        _: None = Depends(_require_api_key),
+        __: None = Depends(_enforce_rate_limit),
         cost_repo: CostRepository = Depends(get_cost_repo),
     ) -> Dict[str, Any]:
         record = cost_repo.get_request(request_id)

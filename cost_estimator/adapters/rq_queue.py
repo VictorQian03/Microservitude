@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from os import getenv
 from typing import Optional
-from uuid import UUID
+from urllib.parse import urlparse
 
 from redis import Redis
 from rq import Queue, Retry
@@ -20,14 +20,20 @@ class RQConfig:
     queue_name: str = "estimates"
     job_func_path: str = "cost_estimator.worker.worker.compute_cost"
     job_timeout_s: int = 120
-    result_ttl_s: int = 0          # results live in Postgres, not RQ
-    failure_ttl_s: int = 86400     # 1 day
+    result_ttl_s: int = 0  # results live in Postgres, not RQ
+    failure_ttl_s: int = 86400  # 1 day
     retry_max: int = 3
     retry_intervals: tuple[int, ...] = (10, 30, 90)
 
 
 def _cfg_from_env() -> RQConfig:
-    url = getenv("RQ_REDIS_URL") or getenv("REDIS_URL", "redis://localhost:6379/0")
+    url = getenv("RQ_REDIS_URL") or getenv("REDIS_URL")
+    if url:
+        _validate_redis_url(url)
+    elif _app_env() == "prod":
+        raise RuntimeError("RQ_REDIS_URL or REDIS_URL must be set when APP_ENV=prod")
+    else:
+        url = "redis://localhost:6379/0"
     name = getenv("RQ_QUEUE_NAME", "estimates")
     func = getenv("RQ_JOB_FUNC", "cost_estimator.worker.worker.compute_cost")
     timeout = int(getenv("RQ_JOB_TIMEOUT", "120"))
@@ -46,6 +52,20 @@ def _cfg_from_env() -> RQConfig:
         retry_max=retry_max,
         retry_intervals=intervals or (10, 30, 90),
     )
+
+
+def _app_env() -> str:
+    return getenv("APP_ENV", "dev").lower()
+
+
+def _validate_redis_url(url: str) -> None:
+    if _app_env() != "prod":
+        return
+    parsed = urlparse(url)
+    if parsed.scheme != "rediss":
+        raise RuntimeError("Redis URL must use rediss:// when APP_ENV=prod")
+    if not parsed.hostname:
+        raise RuntimeError("Redis URL must include a host when APP_ENV=prod")
 
 
 class RQQueue(CostEstimationQueue):
@@ -73,6 +93,7 @@ class RQQueue(CostEstimationQueue):
             retry_max=cfg.retry_max if retry_max is None else retry_max,
             retry_intervals=cfg.retry_intervals if retry_intervals is None else retry_intervals,
         )
+        _validate_redis_url(self._cfg.redis_url)
         self._redis = Redis.from_url(self._cfg.redis_url)
         self._q = Queue(
             name=self._cfg.queue_name,
@@ -85,9 +106,9 @@ class RQQueue(CostEstimationQueue):
         req_id = str(request.id)
         desc = f"cost {request.ticker} {request.side} {request.shares} @ {request.d.isoformat()}"
         job = self._q.enqueue(
-            self._cfg.job_func_path,            # dotted path; worker imports the callable
-            args=(req_id,),                     # only pass the id; state is persisted
-            job_id=req_id,                      # idempotent: one job per request
+            self._cfg.job_func_path,  # dotted path; worker imports the callable
+            args=(req_id,),  # only pass the id; state is persisted
+            job_id=req_id,  # idempotent: one job per request
             description=desc,
             timeout=self._cfg.job_timeout_s,
             result_ttl=self._cfg.result_ttl_s,

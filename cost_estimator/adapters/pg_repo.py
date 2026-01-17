@@ -1,12 +1,12 @@
 # cost_estimator/adapters/pg_repo.py
 from __future__ import annotations
 
-from contextlib import contextmanager
-from dataclasses import dataclass
-from datetime import datetime, date, timezone
-from decimal import Decimal
 import os
 import re
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Any, Callable, Iterable, Iterator, Mapping, Optional, Protocol
 from uuid import UUID
 
@@ -25,17 +25,23 @@ from ..core.models import (
     RequestStatus,
 )
 from ..core.ports import (
-    LiquidityRepository as LiquidityRepositoryPort,
-    ModelRepository as ModelRepositoryPort,
     CostRequestRepository as CostRequestRepositoryPort,
+)
+from ..core.ports import (
+    LiquidityRepository as LiquidityRepositoryPort,
+)
+from ..core.ports import (
+    ModelRepository as ModelRepositoryPort,
 )
 
 # ------------ DSN helpers ------------
 
 _ENV_DSN_KEYS = ("DATABASE_URL", "DB_DSN", "POSTGRES_DSN")
 
+
 def _normalize_dsn(dsn: str) -> str:
     return re.sub(r"^postgresql\+\w+://", "postgresql://", dsn)
+
 
 def _env_dsn(env_var: Optional[str] = None) -> str:
     if env_var:
@@ -49,15 +55,19 @@ def _env_dsn(env_var: Optional[str] = None) -> str:
             return _normalize_dsn(raw)
     raise RuntimeError("No DATABASE_URL/DB_DSN/POSTGRES_DSN found in env")
 
+
 # ------------ Pool abstractions ------------
+
 
 class _PoolLike(Protocol):
     @contextmanager
     def connection(self) -> Iterator[psycopg.Connection]: ...
 
+
 @dataclass(slots=True)
 class PgConfig:
     dsn: str
+
 
 class PgPool:
     def __init__(self, cfg: PgConfig):
@@ -76,6 +86,7 @@ class PgPool:
     def close(self) -> None:
         self._pool.close()
 
+
 class _FactoryPool:
     def __init__(self, factory: Callable[[], psycopg.Connection]):
         self._factory = factory
@@ -90,6 +101,7 @@ class _FactoryPool:
         finally:
             conn.row_factory = orig
 
+
 def _build_pool(
     *,
     pool: Optional[_PoolLike] = None,
@@ -103,6 +115,7 @@ def _build_pool(
     if dsn:
         return PgPool(PgConfig(dsn=_normalize_dsn(dsn)))
     return PgPool(PgConfig(dsn=_env_dsn()))
+
 
 def _as_str(x) -> str:
     try:
@@ -165,7 +178,9 @@ def _normalize_models_payload(models: Any) -> dict[str, dict[str, Any]]:
         normalized[normalized_name] = normalized_payload
     return normalized
 
+
 # ------------ Liquidity repo ------------
+
 
 class LiquidityRepository(LiquidityRepositoryPort):
     def __init__(
@@ -190,7 +205,7 @@ class LiquidityRepository(LiquidityRepositoryPort):
         return Liquidity(
             ticker=row["ticker"],
             d=row["d"],
-            adv_usd=Decimal(row["adv_usd"]) if row["adv_usd"] is not None else None,
+            adv_usd=Decimal(row["adv_usd"]),
         )
 
     # Convenience for tests expecting a float
@@ -202,7 +217,9 @@ class LiquidityRepository(LiquidityRepositoryPort):
             return None
         return float(row["adv_usd"])
 
+
 # ------------ Model repo ------------
+
 
 class ModelRepository(ModelRepositoryPort):
     def __init__(
@@ -252,7 +269,9 @@ class ModelRepository(ModelRepositoryPort):
             created_at=row["created_at"],
         )
 
+
 # ------------ Cost repo ------------
+
 
 class CostRepository(CostRequestRepositoryPort):
     def __init__(
@@ -379,7 +398,9 @@ class CostRepository(CostRequestRepositoryPort):
         if not row:
             return None
         return CostResult(
-            request_id=row["request_id"] if isinstance(row["request_id"], UUID) else UUID(row["request_id"]),
+            request_id=row["request_id"]
+            if isinstance(row["request_id"], UUID)
+            else UUID(row["request_id"]),
             adv_usd=Decimal(row["adv_usd"]) if row["adv_usd"] is not None else None,
             models=row["models"] or {},
             best_model=_as_str(row["best_model"]) if row["best_model"] is not None else None,
@@ -408,15 +429,26 @@ class CostRepository(CostRequestRepositoryPort):
         with self.pool.connection() as c, c.transaction():
             c.execute(
                 sql,
-                (rid, ticker, int(shares), _as_str(side), d, Decimal(notional_usd), _as_str(status)),
+                (
+                    rid,
+                    ticker,
+                    int(shares),
+                    _as_str(side),
+                    d,
+                    Decimal(notional_usd),
+                    _as_str(status),
+                ),
             )
         return rid
 
+
 # ------------ Wiring helpers ------------
+
 
 def make_pool_from_env(env_var: str = "DATABASE_URL") -> PgPool:
     dsn = _env_dsn(env_var)
     return PgPool(PgConfig(dsn=dsn))
+
 
 @dataclass(slots=True)
 class PgRepositories:

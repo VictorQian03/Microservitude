@@ -8,9 +8,9 @@ from typing import Any, Dict, Tuple
 
 from cost_estimator.adapters.pg_repo import PgRepositories
 from cost_estimator.core.calculators import (
+    CostCalculationError,
     calculate_pct_adv_cost,
     calculate_sqrt_cost,
-    CostCalculationError,
 )
 from cost_estimator.core.models import CostRequestRecord
 
@@ -53,9 +53,7 @@ def _compute_pct_adv(
     c = _dec(params.get("c", 0.5))
     cap = params.get("cap", 0.1)
     cap_dec = _dec(cap) if cap is not None else None
-    return calculate_pct_adv_cost(
-        notional_usd=notional_usd, adv_usd=adv_usd, c=c, cap=cap_dec
-    )
+    return calculate_pct_adv_cost(notional_usd=notional_usd, adv_usd=adv_usd, c=c, cap=cap_dec)
 
 
 def _compute_sqrt(
@@ -71,9 +69,7 @@ def _compute_sqrt(
     a = _dec(params.get("A", 300.0))
     b = _dec(params.get("B", 0.0))
     adv_shares = adv_usd / price
-    return calculate_sqrt_cost(
-        shares=shares, adv_shares=adv_shares, price=price, a=a, b=b
-    )
+    return calculate_sqrt_cost(shares=shares, adv_shares=adv_shares, price=price, a=a, b=b)
 
 
 def compute_cost(request_id: str) -> bool:
@@ -108,9 +104,7 @@ def compute_cost(request_id: str) -> bool:
             params = m.params or {}
 
             if model_name == "pct_adv":
-                usd, bps = _compute_pct_adv(
-                    notional_usd=notional, adv_usd=adv_usd, params=params
-                )
+                usd, bps = _compute_pct_adv(notional_usd=notional, adv_usd=adv_usd, params=params)
             elif model_name == "sqrt":
                 usd, bps = _compute_sqrt(
                     shares=shares, notional_usd=notional, adv_usd=adv_usd, params=params

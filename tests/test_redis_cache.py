@@ -88,7 +88,9 @@ def test_from_json_fallback_handles_stringified_fields(monkeypatch: pytest.Monke
     def _raise(*args, **kwargs):
         raise ValueError("boom")
 
-    monkeypatch.setattr(redis_cache.CachedADV, "model_validate_json", classmethod(_raise), raising=False)
+    monkeypatch.setattr(
+        redis_cache.CachedADV, "model_validate_json", classmethod(_raise), raising=False
+    )
     monkeypatch.setattr(redis_cache.CachedADV, "parse_raw", classmethod(_raise), raising=False)
 
     raw_data = {

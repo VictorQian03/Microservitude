@@ -1,17 +1,17 @@
-import os
-import time
 import json
+import os
+import re
+import time
 import uuid
 from contextlib import closing
 from datetime import date
-from pathlib import Path
-import re
+from math import sqrt
 
-import pytest
 import psycopg
+import pytest
 from redis import Redis
 from rq import Queue, SimpleWorker
-from rq.serializers import JSONSerializer 
+from rq.serializers import JSONSerializer
 from testcontainers.postgres import PostgresContainer
 from testcontainers.redis import RedisContainer
 
@@ -36,7 +36,7 @@ PCT_ADV_EXPECT_USD = TEST_NOTIONAL * PCT_ADV_EXPECT_BPS / 1e4
 # sqrt: cost_bps = A*sqrt(Q/ADV_shares) + B. Choose A=300, B=0.
 # sqrt(0.004) ~= 0.0632455532. bps ~= 18.9737
 SQRT_PARAMS = {"A": 300.0, "B": 0.0}
-from math import sqrt
+
 SQRT_EXPECT_BPS = SQRT_PARAMS["A"] * sqrt(TEST_SHARES / ADV_SHARES) + SQRT_PARAMS["B"]
 SQRT_EXPECT_USD = TEST_NOTIONAL * SQRT_EXPECT_BPS / 1e4
 
@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS symbols(
 CREATE TABLE IF NOT EXISTS daily_liquidity(
   ticker TEXT REFERENCES symbols(ticker),
   d DATE,
-  adv_usd NUMERIC,
+  adv_usd NUMERIC NOT NULL CHECK (adv_usd > 0),
   PRIMARY KEY (ticker, d)
 );
 CREATE TABLE IF NOT EXISTS impact_models(
@@ -61,11 +61,11 @@ CREATE TABLE IF NOT EXISTS impact_models(
 );
 CREATE TABLE IF NOT EXISTS cost_requests(
   id UUID PRIMARY KEY,
-  ticker TEXT NOT NULL,
+  ticker TEXT NOT NULL REFERENCES symbols(ticker),
   shares BIGINT NOT NULL,
   side TEXT CHECK (side IN ('buy','sell')) NOT NULL,
   d DATE NOT NULL,
-  notional_usd NUMERIC NOT NULL,
+  notional_usd NUMERIC NOT NULL CHECK (notional_usd > 0),
   status TEXT CHECK (status IN ('queued','done','error')) NOT NULL,
   created_at TIMESTAMP DEFAULT now()
 );
@@ -74,8 +74,8 @@ CREATE TABLE IF NOT EXISTS cost_results(
   adv_usd NUMERIC,
   models JSONB,
   best_model TEXT,
-  total_cost_usd NUMERIC,
-  total_cost_bps NUMERIC,
+  total_cost_usd NUMERIC NOT NULL,
+  total_cost_bps NUMERIC NOT NULL,
   computed_at TIMESTAMP DEFAULT now()
 );
 """
@@ -97,6 +97,7 @@ VALUES ('sqrt', 1, %(sqrt_params)s::jsonb, TRUE)
 ON CONFLICT (name, version) DO UPDATE SET params = EXCLUDED.params, active = TRUE;
 """
 
+
 def _exec_many(conn, sql: str, params=None):
     """
     psycopg3 forbids multiple commands in prepared statements.
@@ -111,11 +112,13 @@ def _exec_many(conn, sql: str, params=None):
                 cur.execute(stmt, prepare=False)
     conn.commit()
 
+
 @pytest.fixture(scope="session")
 def postgres_container():
     with PostgresContainer("postgres:16") as pg:
         pg.start()
         yield pg
+
 
 @pytest.fixture(scope="session")
 def redis_container():
@@ -123,14 +126,17 @@ def redis_container():
         rc.start()
         yield rc
 
+
 @pytest.fixture(scope="session")
 def db_dsn(postgres_container):
     url = postgres_container.get_connection_url()
-    return re.sub(r'^\w+\+psycopg2://', 'postgresql://', url)
+    return re.sub(r"^\w+\+psycopg2://", "postgresql://", url)
+
 
 @pytest.fixture(scope="session")
 def redis_url(redis_container):
     return f"redis://{redis_container.get_container_host_ip()}:{redis_container.get_exposed_port(6379)}"
+
 
 @pytest.fixture(scope="session")
 def db_conn(db_dsn):
@@ -149,24 +155,29 @@ def db_conn(db_dsn):
         )
         yield conn
 
+
 @pytest.fixture(scope="session")
 def redis_client(redis_url):
-    r = Redis.from_url(redis_url, decode_responses=False) 
+    r = Redis.from_url(redis_url, decode_responses=False)
     r.flushdb()
     yield r
     r.flushdb()
 
+
 @pytest.fixture(scope="session")
 def env_wiring(db_dsn, redis_url):
+    os.environ["APP_ENV"] = "test"
     os.environ["DATABASE_URL"] = db_dsn
     os.environ["DB_DSN"] = db_dsn
     os.environ["POSTGRES_DSN"] = db_dsn
     os.environ["REDIS_URL"] = redis_url
     os.environ["RQ_REDIS_URL"] = redis_url
     os.environ["RQ_QUEUE_NAME"] = "estimates"
+    os.environ["API_KEY"] = "integration-test-key"
     # Price hint used by worker if implemented
     os.environ.setdefault("PRICE_TEST_DEFAULT", str(TEST_PRICE))
     yield
+
 
 @pytest.fixture(scope="session")
 def app(env_wiring):
@@ -174,26 +185,43 @@ def app(env_wiring):
     mod = pytest.importorskip("cost_estimator.api.main")
     return getattr(mod, "app", None) or getattr(mod, "create_app")()
 
+
 @pytest.fixture
 async def http_client(app):
     import httpx
     from asgi_lifespan import LifespanManager
+
     async with LifespanManager(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            headers={"X-API-Key": os.environ.get("API_KEY", "")},
+        ) as client:
             yield client
+
 
 @pytest.fixture
 def rq_queue(redis_client):
     return Queue("estimates", connection=redis_client, serializer=JSONSerializer)
+
 
 @pytest.fixture
 def rq_worker(redis_client, rq_queue):
     worker = SimpleWorker([rq_queue], connection=redis_client, serializer=JSONSerializer)
     return worker
 
+
 # Utility to insert a queued request row directly if needed
-def insert_request(conn, *, ticker=TEST_TICKER, d=TEST_DATE, shares=TEST_SHARES, side=TEST_SIDE, notional=TEST_NOTIONAL):
+def insert_request(
+    conn,
+    *,
+    ticker=TEST_TICKER,
+    d=TEST_DATE,
+    shares=TEST_SHARES,
+    side=TEST_SIDE,
+    notional=TEST_NOTIONAL,
+):
     rid = uuid.uuid4()
     with conn.cursor() as cur:
         cur.execute(
@@ -206,13 +234,23 @@ def insert_request(conn, *, ticker=TEST_TICKER, d=TEST_DATE, shares=TEST_SHARES,
     conn.commit()
     return str(rid)
 
+
 def fetch_result(conn, rid):
     with conn.cursor() as cur:
-        cur.execute("SELECT best_model, total_cost_bps, total_cost_usd, models::text FROM cost_results WHERE request_id = %s", (rid,))
+        cur.execute(
+            "SELECT best_model, total_cost_bps, total_cost_usd, models::text FROM cost_results WHERE request_id = %s",
+            (rid,),
+        )
         row = cur.fetchone()
         if not row:
             return None
-        return {"best_model": row[0], "bps": float(row[1]), "usd": float(row[2]), "models": json.loads(row[3])}
+        return {
+            "best_model": row[0],
+            "bps": float(row[1]),
+            "usd": float(row[2]),
+            "models": json.loads(row[3]),
+        }
+
 
 def wait_until(fn, timeout=5.0, interval=0.05):
     start = time.time()

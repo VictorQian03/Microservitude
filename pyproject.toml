@@ -82,6 +82,14 @@ filterwarnings = [
   "ignore:.*distutils.*:DeprecationWarning",
 ]
 
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
 # Default DB paths and URLs used by ce-db-* scripts.
 [tool.cost_estimator.db]
 database_url = "postgresql+psycopg://postgres:postgres@localhost:5432/costdb"

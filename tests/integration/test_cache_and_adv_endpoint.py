@@ -1,5 +1,3 @@
-import json
-
 async def test_adv_endpoint_caches(redis_client, http_client):
     key = f"adv:{'AAPL'}:{'2025-09-19'}"
     assert redis_client.get(key) is None

@@ -1,4 +1,5 @@
 """Domain data models for the execution cost estimator core."""
+
 from __future__ import annotations
 
 from datetime import date, datetime

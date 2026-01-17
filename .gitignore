@@ -19,6 +19,7 @@ ENV/
 
 # Testing artifacts
 .pytest_cache/
+artifacts/
 
 # IDE / tooling
 *.swp

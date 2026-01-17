@@ -141,48 +141,64 @@ class FakePgRepos:
         self.pool = _DummyCloser()
 
     @property
-    def models(self) -> None:  
+    def models(self) -> None:
         return None
 
 
-@pytest.fixture()
-def fastapi_client(monkeypatch: pytest.MonkeyPatch) -> Tuple[TestClient, FakeQueue, FakeCache]:
+def _build_client(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    rate_limit_per_min: str | None = None,
+) -> Tuple[TestClient, FakeQueue, FakeCache]:
     cost_repo = FakeCostRepo()
-    liquidity_repo = FakeLiquidityRepo(
-        {("AAPL", date(2025, 9, 19)): Decimal("5000000000")}
-    )
+    liquidity_repo = FakeLiquidityRepo({("AAPL", date(2025, 9, 19)): Decimal("5000000000")})
     cache = FakeCache()
     queue = FakeQueue(cost_repo)
     repos = FakePgRepos(liquidity_repo, cost_repo)
 
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("API_KEY", "test-api-key")
     monkeypatch.setenv("PRICE_TEST_DEFAULT", "200")
+    if rate_limit_per_min is not None:
+        monkeypatch.setenv("RATE_LIMIT_PER_MIN", rate_limit_per_min)
     monkeypatch.setattr(
         api_main.PgRepositories,
         "from_env",
         classmethod(lambda cls, env_var="DATABASE_URL": repos),
     )
-    monkeypatch.setattr(api_main, "make_redis_cache_from_env", lambda env_var="REDIS_URL", namespace="adv": cache)
+    monkeypatch.setattr(
+        api_main, "make_redis_cache_from_env", lambda env_var="REDIS_URL", namespace="adv": cache
+    )
     monkeypatch.setattr(api_main, "make_rq_queue_from_env", lambda: queue)
 
     app = api_main.create_app()
     client = TestClient(app)
+    return client, queue, cache
+
+
+@pytest.fixture()
+def fastapi_client(monkeypatch: pytest.MonkeyPatch) -> Tuple[TestClient, FakeQueue, FakeCache]:
+    client, queue, cache = _build_client(monkeypatch)
     try:
         yield client, queue, cache
     finally:
         client.close()
 
 
-def test_estimate_request_lifecycle(fastapi_client: Tuple[TestClient, FakeQueue, FakeCache]) -> None:
+def test_estimate_request_lifecycle(
+    fastapi_client: Tuple[TestClient, FakeQueue, FakeCache],
+) -> None:
     client, queue, _cache = fastapi_client
+    headers = {"X-API-Key": "test-api-key"}
 
     body = {"ticker": "AAPL", "shares": 1000, "side": "buy", "date": "2025-09-19"}
-    resp = client.post("/estimate", json=body)
+    resp = client.post("/estimate", json=body, headers=headers)
     assert resp.status_code == 200
     payload = resp.json()
     rid = payload["request_id"]
     assert payload["status"] == "queued"
 
-    status_resp = client.get(f"/estimate/{rid}")
+    status_resp = client.get(f"/estimate/{rid}", headers=headers)
     assert status_resp.status_code == 200
     status_payload = status_resp.json()
     assert status_payload["status"] == "queued"
@@ -191,10 +207,41 @@ def test_estimate_request_lifecycle(fastapi_client: Tuple[TestClient, FakeQueue,
 
     queue.process_all()
 
-    final_resp = client.get(f"/estimate/{rid}")
+    final_resp = client.get(f"/estimate/{rid}", headers=headers)
     assert final_resp.status_code == 200
     final_payload = final_resp.json()
     assert final_payload["status"] == "done"
     assert final_payload["best_model"] == "pct_adv"
     assert Decimal(final_payload["total_cost_usd"]) == Decimal("4000")
     assert Decimal(final_payload["total_cost_bps"]) == Decimal("20")
+
+
+def test_health_is_public(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _queue, _cache = _build_client(monkeypatch)
+    try:
+        resp = client.get("/health")
+        assert resp.status_code == 200
+    finally:
+        client.close()
+
+
+def test_missing_api_key_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _queue, _cache = _build_client(monkeypatch)
+    try:
+        body = {"ticker": "AAPL", "shares": 1000, "side": "buy", "date": "2025-09-19"}
+        resp = client.post("/estimate", json=body)
+        assert resp.status_code == 401
+    finally:
+        client.close()
+
+
+def test_rate_limit_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _queue, _cache = _build_client(monkeypatch, rate_limit_per_min="1")
+    headers = {"X-API-Key": "test-api-key"}
+    try:
+        resp1 = client.get("/adv/AAPL", params={"date": "2025-09-19"}, headers=headers)
+        assert resp1.status_code == 200
+        resp2 = client.get("/adv/AAPL", params={"date": "2025-09-19"}, headers=headers)
+        assert resp2.status_code == 429
+    finally:
+        client.close()

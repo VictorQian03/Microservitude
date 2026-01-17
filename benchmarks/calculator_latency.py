@@ -1,9 +1,9 @@
 """Latency benchmarks for core calculator functions."""
+
 from __future__ import annotations
 
 import argparse
 import statistics
-import sys
 import time
 from dataclasses import dataclass
 from decimal import Decimal
@@ -12,10 +12,16 @@ from pathlib import Path
 from typing import Callable, Iterable, List
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
-from cost_estimator.core.calculators import calculate_pct_adv_cost, calculate_sqrt_cost
+
+def _get_calculators():
+    import sys
+
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from cost_estimator.core.calculators import calculate_pct_adv_cost, calculate_sqrt_cost
+
+    return calculate_pct_adv_cost, calculate_sqrt_cost
 
 
 @dataclass
@@ -61,6 +67,7 @@ def measure(case: BenchmarkCase, runs: int, warmup: int) -> BenchmarkResult:
 
 
 def get_cases() -> Iterable[BenchmarkCase]:
+    calculate_pct_adv_cost, calculate_sqrt_cost = _get_calculators()
     return [
         BenchmarkCase(
             name="pct_adv_basic",
@@ -124,7 +131,9 @@ def format_result(result: BenchmarkResult) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Latency benchmarks for calculator functions.")
     parser.add_argument("--runs", type=int, default=1000, help="Number of recorded runs per case")
-    parser.add_argument("--warmup", type=int, default=100, help="Number of warmup iterations per case")
+    parser.add_argument(
+        "--warmup", type=int, default=100, help="Number of warmup iterations per case"
+    )
     args = parser.parse_args()
 
     cases = list(get_cases())
